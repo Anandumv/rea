@@ -325,6 +325,148 @@ describe.skipIf(process.platform === "win32")(
   },
 );
 
+const notesOverride = async (
+  linesFor: (bin: string) => readonly string[],
+  filename = "org.example.notes.desktop",
+) => {
+  const { home, bin, environment } = await fixture();
+  const applications = join(environment.XDG_DATA_HOME, "applications");
+  await mkdir(applications, { recursive: true });
+  const file = join(applications, filename);
+  await writeFile(
+    file,
+    ["[Desktop Entry]", "Type=Application", ...linesFor(bin)].join("\n"),
+  );
+  const id = filename.slice(0, -".desktop".length);
+  const inspect = (desktopEntry = id) =>
+    inspectLinuxApplication({
+      desktopEntry,
+      executable: undefined,
+      arguments: [],
+      environment,
+      home,
+      callerDirectory: home,
+    });
+  return { inspect, file, bin };
+};
+
+describe.skipIf(process.platform === "win32")(
+  "desktop entry TryExec availability",
+  () => {
+    it.each([
+      ["missing-try-exec", "notes-app"],
+      ["missing-try-exec", "missing-try-exec"],
+      ["/no/such/rea-tryexec", "notes-app"],
+    ] as const)(
+      "falls back when TryExec %s is unavailable and Exec is %s",
+      async (tryExec, exec) => {
+        const { inspect, file } = await notesOverride(() => [
+          "Name=User copy",
+          `Exec=${exec}`,
+          `TryExec=${tryExec}`,
+        ]);
+        expect(await inspect()).toMatchObject({
+          ok: true,
+          value: {
+            inventory: {
+              argv: ["notes-app", "--new"],
+              desktop_entry: { id: "org.example.notes", name: "Notes" },
+            },
+          },
+        });
+        expect(await inspect(file)).toEqual({
+          ok: false,
+          error: { reason: "executable_not_found", program: tryExec },
+        });
+      },
+    );
+
+    it("keeps the higher-priority entry when TryExec is executable", async () => {
+      const named = await notesOverride(() => [
+        "Name=User copy",
+        "Exec=notes-app --user",
+        "TryExec=notes-app",
+      ]);
+      expect(await named.inspect()).toMatchObject({
+        ok: true,
+        value: {
+          inventory: {
+            argv: ["notes-app", "--user"],
+            executable: { path: join(named.bin, "notes-app") },
+            desktop_entry: { name: "User copy" },
+          },
+        },
+      });
+    });
+
+    it("keeps the higher-priority entry when TryExec is an absolute executable", async () => {
+      const { inspect } = await notesOverride((bin) => [
+        "Name=Absolute copy",
+        "Exec=notes-app --absolute",
+        `TryExec=${join(bin, "notes-app")}`,
+      ]);
+      expect(await inspect()).toMatchObject({
+        ok: true,
+        value: {
+          inventory: {
+            argv: ["notes-app", "--absolute"],
+            desktop_entry: { name: "Absolute copy" },
+          },
+        },
+      });
+    });
+
+    it("keeps an entry whose TryExec is empty", async () => {
+      const { inspect } = await notesOverride(() => [
+        "Name=User copy",
+        "Exec=notes-app",
+        "TryExec=",
+      ]);
+      expect(await inspect()).toMatchObject({
+        ok: true,
+        value: { inventory: { desktop_entry: { name: "User copy" } } },
+      });
+    });
+
+    it("skips a TryExec file that exists but is not executable", async () => {
+      const { inspect, bin } = await notesOverride(() => [
+        "Name=User copy",
+        "Exec=notes-app",
+        "TryExec=plain-file",
+      ]);
+      await writeFile(join(bin, "plain-file"), "not executable\n");
+      expect(await inspect()).toMatchObject({
+        ok: true,
+        value: { inventory: { desktop_entry: { name: "Notes" } } },
+      });
+    });
+
+    it("does not let Hidden mask an entry whose TryExec is unavailable", async () => {
+      const { inspect } = await notesOverride(() => [
+        "Name=User copy",
+        "Exec=notes-app",
+        "TryExec=missing-try-exec",
+        "Hidden=true",
+      ]);
+      expect(await inspect()).toMatchObject({
+        ok: true,
+        value: { inventory: { desktop_entry: { name: "Notes" } } },
+      });
+    });
+
+    it("does not select the only entry when its TryExec is unavailable", async () => {
+      const { inspect } = await notesOverride(
+        () => ["Name=Only", "Exec=notes-app", "TryExec=missing-try-exec"],
+        "org.example.only.desktop",
+      );
+      expect(await inspect()).toMatchObject({
+        ok: false,
+        error: { reason: "desktop_entry_not_found" },
+      });
+    });
+  },
+);
+
 describe.skipIf(process.platform === "win32")("inspectLinuxApplication", () => {
   it("resolves a desktop entry id into a launch command and state directories", async () => {
     const { home, bin, environment } = await fixture();

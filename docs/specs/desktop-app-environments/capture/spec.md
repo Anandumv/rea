@@ -42,7 +42,10 @@ folder to build the environment; this step builds nothing.
   open. The output folder is made private (0700) and its files are
   created exclusively (0600).
 - The inventory resolves a desktop entry id through `$XDG_DATA_HOME` and
-  `$XDG_DATA_DIRS`, following an entry installed as a symbolic link, expands
+  `$XDG_DATA_DIRS`, following an entry installed as a symbolic link. An
+  Application whose `TryExec` program is not executable is skipped so a later
+  entry with the same id can be selected; an absolute path rejects that file
+  and does not substitute another entry. It expands
   its `Exec` line with no files and appends `--argument` values, resolves the
   program on `PATH` (the one an `env NAME=value` prefix sets, whose XDG
   folders also name the state directories), and identifies the package:

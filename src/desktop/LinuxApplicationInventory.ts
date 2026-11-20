@@ -155,12 +155,44 @@ const findNestedDesktopEntry = async (
   return incomplete ? { truncated: true } : undefined;
 };
 
+/**
+ * GIO loads an Application only when `TryExec` is absent, empty, or executable.
+ * A malformed entry keeps its existing structural refusal instead.
+ */
+const unavailableTryExec = async (
+  entry: DesktopEntry,
+  request: LinuxApplicationRequest,
+  signal: AbortSignal | undefined,
+): Promise<string | undefined> => {
+  if (entry.malformed_line !== undefined || entry.type !== "Application")
+    return undefined;
+  const program = entry.try_exec;
+  if (program === null || program === "") return undefined;
+  const startedIn =
+    entry.path !== null && isAbsolute(entry.path) ? entry.path : request.home;
+  const found = await resolveProgram(program, request.environment, startedIn);
+  assertArtifactReadActive(signal);
+  return found === undefined ? program : undefined;
+};
+
 const locateDesktopEntry = async (
   request: LinuxApplicationRequest,
   selector: string,
   signal?: AbortSignal,
 ): ReturnType<typeof readDesktopEntry> => {
-  if (isAbsolute(selector)) return readDesktopEntry(selector, null, signal);
+  if (isAbsolute(selector)) {
+    const located = await readDesktopEntry(selector, null, signal);
+    if (!located.ok) return located;
+    // A named file is rejected. ID search is what tries the next match.
+    const unavailable = await unavailableTryExec(
+      located.value.entry,
+      request,
+      signal,
+    );
+    return unavailable === undefined
+      ? located
+      : err({ reason: "executable_not_found", program: unavailable });
+  }
   const id = selector.endsWith(".desktop") ? selector : `${selector}.desktop`;
   const searched = desktopEntryDirectories(request.environment, request.home);
   for (const directory of searched) {
@@ -186,7 +218,14 @@ const locateDesktopEntry = async (
       id.slice(0, -".desktop".length),
       signal,
     );
-    if (!located.ok || !located.value.entry.hidden) return located;
+    if (!located.ok) return located;
+    // An unavailable TryExec is not installed here. Keep searching.
+    if (
+      (await unavailableTryExec(located.value.entry, request, signal)) !==
+      undefined
+    )
+      continue;
+    if (!located.value.entry.hidden) return located;
     const { type, malformed_line } = located.value.entry;
     if (type !== "Application") continue;
     // Claim deletion only after the hidden entry establishes its structure.
