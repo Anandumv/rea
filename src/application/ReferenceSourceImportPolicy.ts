@@ -6,6 +6,7 @@ import {
   locateReferenceSourceGitDirectory,
   ReferenceSourceGitDirectoryCancelled,
 } from "./ReferenceSourceGitDirectory.js";
+import { hostGitMetadataPath } from "./referenceSourceGitMetadataPath.js";
 import type { ReferenceSourceReaderError } from "../reference/ReferenceSourceReaderTypes.js";
 
 import ignore from "ignore";
@@ -222,13 +223,14 @@ const readIgnoreCase = async (
     // isomorphic-git probes readFile() without a path to detect promise APIs.
     if (path === undefined)
       throw new TypeError("Git metadata path is required");
-    const read = await readPolicyFile(path, resources, signal);
+    const metadataPath = hostGitMetadataPath(path);
+    const read = await readPolicyFile(metadataPath, resources, signal);
     if (!read.ok) {
       readFailure = read.error;
       throw read.error;
     }
     if (read.value === undefined) {
-      const absent = new Error(`Git metadata file is absent: ${path}`);
+      const absent = new Error(`Git metadata file is absent: ${metadataPath}`);
       Object.assign(absent, { code: "ENOENT" });
       throw absent;
     }
@@ -254,7 +256,7 @@ const readIgnoreCase = async (
     return err(
       failure(
         "io",
-        `Invalid core.ignorecase in ${location.commonDirectory}/config`,
+        `Invalid core.ignorecase in ${join(location.commonDirectory, "config")}`,
       ),
     );
   } catch (cause: unknown) {

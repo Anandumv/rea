@@ -6,6 +6,7 @@ import {
   locateReferenceSourceGitDirectory,
   ReferenceSourceGitDirectoryCancelled,
 } from "./ReferenceSourceGitDirectory.js";
+import { hostGitMetadataPath } from "./referenceSourceGitMetadataPath.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
   type ArtifactResourceScope,
@@ -193,7 +194,7 @@ const resolveSourceVcs = async (
         if (path === undefined)
           throw new TypeError("Git metadata path is required");
         try {
-          const bytes = await readMetadataBytes(path);
+          const bytes = await readMetadataBytes(hostGitMetadataPath(path));
           const encoding =
             typeof options === "string"
               ? options
