@@ -19,6 +19,7 @@ import {
   completeSemanticSteps,
   traverseJavaScriptValueAstSteps,
 } from "./javascriptSemanticTraversal.js";
+import { indexSemanticDestructuringCompletion } from "./javascriptSemanticPatternCompletion.js";
 import {
   evaluateSemanticBinding,
   evaluateSemanticExpression,
@@ -260,8 +261,9 @@ export const immutableSemanticScopes = (
 /** Evaluate and freeze bindings into deterministic IR order. */
 export const immutableSemanticBindings = (
   state: JavaScriptSemanticAnalysisState,
-): JavaScriptSemanticBinding[] =>
-  [...state.bindingsById.values()]
+): JavaScriptSemanticBinding[] => {
+  indexSemanticDestructuringCompletion(state);
+  return [...state.bindingsById.values()]
     .map((binding) => ({
       bindingId: binding.bindingId,
       scopeId: binding.scopeId,
@@ -286,6 +288,7 @@ export const immutableSemanticBindings = (
     .sort((left, right) =>
       compareUnicodeCodePoints(left.bindingId, right.bindingId),
     );
+};
 
 const callableKind = (
   node: t.Node,

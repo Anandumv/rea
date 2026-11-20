@@ -13,8 +13,10 @@ import {
   semanticWriteTargets,
   unwrapJavaScriptExpression,
 } from "./javascriptAstValues.js";
+import { indexSemanticDestructuringCompletion } from "./javascriptSemanticPatternCompletion.js";
 import {
   resolveSemanticBindingState,
+  semanticDestructuringBindingReached,
   type JavaScriptSemanticAnalysisState,
 } from "./javascriptSemanticState.js";
 import { traverseJavaScriptValueAst } from "./javascriptSemanticTraversal.js";
@@ -34,6 +36,7 @@ export const collectJavaScriptSemanticObjects = (
   state: JavaScriptSemanticAnalysisState,
   callables: readonly JavaScriptSemanticCallable[],
 ): JavaScriptSemanticObjectOperation[] => {
+  indexSemanticDestructuringCompletion(state);
   const output: JavaScriptSemanticObjectOperation[] = [];
   const callableIds = new Set(callables.map(({ callableId }) => callableId));
   const callableStack = createSemanticCallableIdStack(callableIds);
@@ -314,6 +317,16 @@ const collectDestructuring = (
       semanticBindingMayRejectAssignmentAt(targetBinding, owner, state);
     if (targetBinding === undefined || assignmentBlocked) ownSlot = undefined;
     if (path === null) continue;
+    // A proven throw in an earlier nested pattern never reads this property.
+    // Keep the path and binding, but do not let the unchanged-slot fallback
+    // publish the read as resolved.
+    const patternReached =
+      targetBinding === undefined ||
+      semanticDestructuringBindingReached(
+        state,
+        targetBinding.bindingId,
+        path,
+      ) !== false;
     addObjectOperation(
       {
         node: occurrence,
@@ -322,8 +335,9 @@ const collectDestructuring = (
         objectBindingId: source.bindingId,
         targetBindingId: targetBinding?.bindingId ?? null,
         propertyPath,
-        partial: assignmentBlocked,
+        partial: assignmentBlocked || !patternReached,
         provenOwnSlot:
+          patternReached &&
           !assignmentBlocked &&
           (ownSlot !== undefined ||
             (plainObjectPath &&

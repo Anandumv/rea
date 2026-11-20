@@ -96,6 +96,17 @@ const outerDeclarationSource = `
   let pending;
 `;
 
+const nullishNestedSource = `
+  const nullishModel = { bad: null, mode: "one" };
+  const { bad: {}, mode: nullishMode } = nullishModel;
+  const coercedModel = { bad: 0, mode: "one" };
+  const { bad: {}, mode: coercedMode } = coercedModel;
+  const defaultedModel = { mode: "one" };
+  const { bad: {} = {}, mode: defaultedMode } = defaultedModel;
+  const nullDefaultModel = { bad: null, mode: "one" };
+  const { bad: {} = {}, mode: nullDefaultMode } = nullDefaultModel;
+`;
+
 const additionalFixtures = [
   ["iterator-close.js", iteratorCloseSource],
   ["array-prototype-alias.js", arrayPrototypeAliasSource],
@@ -106,6 +117,7 @@ const additionalFixtures = [
   ["uninitialized-target.js", uninitializedTargetSource],
   ["declarator-order.js", declaratorOrderSource],
   ["outer-let.js", outerDeclarationSource],
+  ["nullish-nested.js", nullishNestedSource],
 ] as const;
 
 const expectedDependencies = [
@@ -127,6 +139,10 @@ const expectedDependencies = [
   ["afterReady", ["1"]],
   ["beforeOuterLet", ["0"]],
   ["afterOuterLet", ["2"], "candidate"],
+  ["nullishMode", ["mode"], "candidate"],
+  ["coercedMode", ["mode"]],
+  ["defaultedMode", ["mode"]],
+  ["nullDefaultMode", ["mode"], "candidate"],
   ["arrayAssigned", ["0"]],
   ["elided", ["1"]],
   ["projected", ["items", "0"]],
@@ -167,6 +183,10 @@ const tracedBindings = [
   "afterReady",
   "beforeOuterLet",
   "afterOuterLet",
+  "nullishMode",
+  "coercedMode",
+  "defaultedMode",
+  "nullDefaultMode",
   "arrayAssigned",
   "elided",
   "projected",

@@ -32,6 +32,7 @@ import type {
 import {
   recordSemanticValueLimit,
   resolveSemanticBindingState,
+  semanticDestructuringBindingReached,
   type JavaScriptSemanticAnalysisState,
   type JavaScriptSemanticBindingState,
 } from "./javascriptSemanticState.js";
@@ -542,6 +543,19 @@ const evaluateBinding = (
   let evaluated: MemoizedEvaluation<JavaScriptSemanticValue>;
   try {
     evaluated = collectEvaluationDependencies(binding, context, () => {
+      // An earlier nested pattern that throws never initializes this binding.
+      // The same completion fact keeps the object collector from resolving it.
+      if (
+        semanticDestructuringBindingReached(
+          context.state,
+          binding.bindingId,
+          initializer.projection,
+        ) === false
+      )
+        return {
+          status: "unknown",
+          reason: `Binding ${binding.name} is not reached because an earlier nested pattern does not complete.`,
+        };
       const nested = nestedContext(context);
       let value = projectValue(
         evaluateExpression(initializer.node, nested),

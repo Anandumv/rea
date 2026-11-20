@@ -611,3 +611,50 @@ export const semanticVariableScope = (
   }
   return candidate;
 };
+
+interface DestructuringCompletionFacts {
+  indexed: boolean;
+  readonly reached: Map<string, boolean>;
+}
+
+const destructuringCompletionByState = new WeakMap<
+  JavaScriptSemanticAnalysisState,
+  DestructuringCompletionFacts
+>();
+
+/** Shared pattern-completion results for the binding-value and object passes. */
+export const semanticDestructuringCompletionFacts = (
+  state: JavaScriptSemanticAnalysisState,
+): DestructuringCompletionFacts => {
+  let facts = destructuringCompletionByState.get(state);
+  if (facts === undefined) {
+    facts = { indexed: false, reached: new Map() };
+    destructuringCompletionByState.set(state, facts);
+  }
+  return facts;
+};
+
+/** One key for a binding projection, with array indexes normalized to strings. */
+export const semanticDestructuringCompletionKey = (
+  bindingId: string,
+  projection: readonly (string | number | null)[],
+): string =>
+  `${bindingId}\n${JSON.stringify(
+    projection.map((segment) =>
+      typeof segment === "number" ? String(segment) : segment,
+    ),
+  )}`;
+
+/**
+ * Whether normal completion reaches this destructuring projection.
+ * Undefined means the pattern was not indexed or has no nested receiver that
+ * can abort a later binding.
+ */
+export const semanticDestructuringBindingReached = (
+  state: JavaScriptSemanticAnalysisState,
+  bindingId: string,
+  projection: readonly (string | number | null)[],
+): boolean | undefined =>
+  semanticDestructuringCompletionFacts(state).reached.get(
+    semanticDestructuringCompletionKey(bindingId, projection),
+  );

@@ -3,6 +3,7 @@ import {
   analyzeJavaScriptSemantics,
   analyzeParsedJavaScriptSemantics,
 } from "../../domain/javascript/javascriptSemanticAnalysis.js";
+import { topLevelBinding } from "../../domain/javascript/javascriptSemanticAnalysis.fixture.js";
 import { parseJavaScriptSource } from "../../domain/javascript/javascriptSourceParser.js";
 import { graphForJavaScript } from "../../../tests/fixtures/javascriptSemanticGraph.js";
 
@@ -336,6 +337,62 @@ it.each([
           edge.target_node_id === selected?.node_id,
       ),
     ).toMatchObject({ resolution: "candidate" });
+  },
+);
+
+it.each([
+  {
+    name: "a nullish nested pattern",
+    source: `const model = { kept: "yes", bad: null, mode: "one" };
+      const { kept, bad: {}, mode: selected } = model;`,
+    kept: { status: "literal", value: "yes" },
+    selected: { status: "unknown" },
+    resolution: "candidate",
+  },
+  {
+    name: "a coercible nested pattern",
+    source: `const model = { bad: 0, mode: "one" };
+      const { bad: {}, mode: selected } = model;`,
+    kept: undefined,
+    selected: { status: "literal", value: "one" },
+    resolution: "resolved",
+  },
+  {
+    name: "a default that replaces a missing nested receiver",
+    source: `const model = { mode: "one" };
+      const { bad: {} = {}, mode: selected } = model;`,
+    kept: undefined,
+    selected: { status: "literal", value: "one" },
+    resolution: "resolved",
+  },
+  {
+    name: "a default that does not replace null",
+    source: `const model = { bad: null, mode: "one" };
+      const { bad: {} = {}, mode: selected } = model;`,
+    kept: undefined,
+    selected: { status: "unknown" },
+    resolution: "candidate",
+  },
+] as const)(
+  "keeps a later binding unproven after $name",
+  ({ source, kept, selected, resolution }) => {
+    const ir = analyzeJavaScriptSemantics(source);
+    expect(topLevelBinding(ir, "selected").value).toMatchObject(selected);
+    if (kept !== undefined)
+      expect(topLevelBinding(ir, "kept").value).toEqual(kept);
+    const graph = graphForJavaScript(source, ir);
+    const binding = graph.nodes.find(
+      ({ kind, label }) => kind === "binding" && label === "selected",
+    );
+    const relation = graph.relations.find(
+      ({ relation, target_node_id }) =>
+        relation === "destructures" && target_node_id === binding?.node_id,
+    );
+    expect(relation).toMatchObject({ resolution });
+    expect(
+      graph.nodes.find(({ node_id }) => node_id === relation?.source_node_id)
+        ?.properties.property_path,
+    ).toEqual(["mode"]);
   },
 );
 
