@@ -48,6 +48,8 @@ import {
 } from "./DarwinProcessRunTokenReader.js";
 import { darwinHelperCacheDirectory } from "./DarwinHelperCache.js";
 import {
+  LinuxEnvironmentImageOverwritten,
+  overwrittenLinuxEnvironmentReason,
   ProcessRunTokenReadError,
   readProcessRunToken,
   readProcessRunTokens,
@@ -306,7 +308,7 @@ export const observeOwnedProcessLineage = async (
       if (observation.runId !== ownership.runId)
         return unavailableLineage(
           ownership,
-          lineageTokenMismatchReason(member.pid, observation.runId),
+          lineageTokenMismatchReason(member.pid, observation),
         );
       if (member.pid !== launcher.pid) verifiedDescendants.push(member);
       const seeded = examinedRefresh.get(member.pid);
@@ -508,7 +510,7 @@ const observeNativeOwnedProcessLineage = async (
     if (fact.token.runId !== ownership.runId)
       return unavailableLineage(
         ownership,
-        lineageTokenMismatchReason(member.pid, fact.token.runId),
+        lineageTokenMismatchReason(member.pid, fact.token),
       );
     const nativeMember = processWithNativeRelation(
       fact.process,
@@ -617,7 +619,7 @@ const classifyIdentitylessLineageRefresh = async (
     if (observation.runId !== ownership.runId)
       return {
         status: "unavailable",
-        reason: lineageTokenMismatchReason(launcherPid, observation.runId),
+        reason: lineageTokenMismatchReason(launcherPid, observation),
       };
   }
   const identityFailure = launcherIdentityFailure(refreshedLauncher, ownership);
@@ -653,7 +655,7 @@ const classifyIdentitylessLineageRefresh = async (
         if (inTree.has(process.pid))
           return {
             status: "unavailable",
-            reason: lineageTokenMismatchReason(process.pid, observation.runId),
+            reason: lineageTokenMismatchReason(process.pid, observation),
           };
         continue;
       }
@@ -713,11 +715,16 @@ const processWithNativeRelation = (
 
 const lineageTokenMismatchReason = (
   pid: number,
-  observedRunId: string | undefined,
+  observation: Extract<
+    ProcessRunTokenObservation,
+    { readonly state: "readable" }
+  >,
 ): string =>
-  observedRunId === undefined
-    ? `REA_PROCESS_RUN_ID was absent from the readable environment for PID ${String(pid)}; process lineage ownership remains unverified`
-    : "process lineage contains an unowned or PID-reused process";
+  observation.environmentImage === "overwritten"
+    ? overwrittenLinuxEnvironmentReason([pid])
+    : observation.runId === undefined
+      ? `REA_PROCESS_RUN_ID was absent from the readable environment for PID ${String(pid)}; process lineage ownership remains unverified`
+      : "process lineage contains an unowned or PID-reused process";
 
 const unavailableLineage = (
   ownership: OwnedProcessGroup,
@@ -742,6 +749,41 @@ export const parseProcessEnvironment = (
       environment[entry.slice(0, separator)] = entry.slice(separator + 1);
   }
   return environment;
+};
+
+const ENVIRONMENT_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+/**
+ * A kernel environ image ends in a single NUL. Chromium's Linux process
+ * title zeros the rest of the original mapping, which leaves a long tail.
+ * Electron 44.7.2 children carried tails of more than a thousand bytes.
+ */
+const OVERWRITTEN_ENVIRONMENT_NUL_TAIL = 64;
+
+/**
+ * Whether a Linux `/proc/<pid>/environ` image is not a variable list.
+ * An empty file is an empty environment. A list that still contains
+ * `REA_PROCESS_RUN_ID` stays readable. Nameless entries are ignored, matching
+ * {@link parseProcessEnvironment}.
+ */
+export const linuxEnvironmentImageOverwritten = (image: string): boolean => {
+  if (image.length === 0) return false;
+  if (
+    image.split("\0").some((field) => field.startsWith("REA_PROCESS_RUN_ID="))
+  )
+    return false;
+  let end = image.length;
+  while (end > 0 && image.charCodeAt(end - 1) === 0) end -= 1;
+  // One terminating NUL is an empty list. A longer NUL-only image is padding.
+  if (end === 0) return image.length > 1;
+  if (image.length - end >= OVERWRITTEN_ENVIRONMENT_NUL_TAIL) return true;
+  for (const field of image.slice(0, end).split("\0")) {
+    if (field.length === 0) continue;
+    const separator = field.indexOf("=");
+    if (separator === 0) continue;
+    const key = separator > 0 ? field.slice(0, separator) : "";
+    if (!ENVIRONMENT_VARIABLE_NAME.test(key)) return true;
+  }
+  return false;
 };
 
 const identityFact = (
@@ -1634,10 +1676,18 @@ export const createSystemProcessOwnershipHost = (
     listProcesses,
     async environment(pid, signal) {
       assertProcessOwnershipInspectionActive(signal);
-      if (platform === "linux")
-        return parseProcessEnvironment(
-          await readProcessInspectionFile(`/proc/${pid}/environ`, signal),
+      if (platform === "linux") {
+        const image = await readProcessInspectionFile(
+          `/proc/${pid}/environ`,
+          signal,
         );
+        // An overwritten image is not an empty variable list. Token readers
+        // map this rejection to an unproven run id and keep unrelated
+        // Chromium processes out of the failure set.
+        if (linuxEnvironmentImageOverwritten(image))
+          throw new LinuxEnvironmentImageOverwritten();
+        return parseProcessEnvironment(image);
+      }
       if (platform === "darwin") {
         const process = (await listProcesses(signal)).find(
           (entry) => entry.pid === pid,

@@ -228,13 +228,17 @@ If cleanup cannot be verified, the error retains collected observations in
 Cleanup uncertainty does not authorize signaling unrelated processes.
 
 On Linux, Chromium-based processes can overwrite the initial environment memory
-exposed through `/proc/<pid>/environ`. The environment may be readable while
-`REA_PROCESS_RUN_ID` is absent, even if the application still sees it through
-`process.env`. REA reports the missing marker and leaves lineage ownership and
-cleanup unverified; the PID, executable, or parent relationship cannot replace
-that ownership proof. This limitation can affect owned Electron captures on
-native Linux as well as WSL. It does not establish that all Electron versions or
-Linux environments behave the same way.
+exposed through `/proc/<pid>/environ`. The file may still be readable. When the
+bytes are a variable list that simply lacks `REA_PROCESS_RUN_ID`, REA reports
+the missing marker. When the image is not a variable list, the run token cannot
+be read from that process. The image may be only NUL bytes, command-line text,
+or a short prefix followed by a long NUL tail. Chromium-based processes do this
+on Linux even when the application still sees the variable through
+`process.env`. REA names that image and leaves lineage ownership and cleanup
+unverified. It does not signal the process from the image. The PID, executable,
+or parent relationship cannot replace that ownership proof. This limitation can
+affect owned Electron captures on native Linux as well as WSL. It does not
+establish that all Electron versions or Linux environments behave the same way.
 
 Main-process IPC recording keeps original-function removal for `on` and `once`
 registrations and records a fired `once` callback once. Native Node.js owns

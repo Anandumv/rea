@@ -9,6 +9,7 @@ import {
 } from "./ProcessOwnership.js";
 import { ProcessOwnershipEvidenceOwner } from "./ProcessOwnershipEvidence.js";
 import { observeOwnedProcessLineage } from "./ProcessOwnershipObservation.js";
+import { LinuxEnvironmentImageOverwritten } from "./ProcessRunTokenObservations.js";
 
 const launcher: ProcessTableEntry = {
   pid: 100,
@@ -97,6 +98,144 @@ it.each(
     expect(signalGroup).not.toHaveBeenCalled();
   },
 );
+
+const overwrittenEnvironmentReason = (pid: number): string =>
+  `Linux /proc environment image for PID ${String(pid)} is not a variable list, so REA_PROCESS_RUN_ID cannot be read; Chromium-based processes overwrite this memory and lineage ownership remains unverified`;
+
+it.each([false, true])(
+  "leaves an overwritten Linux environ image unverified, native=%s",
+  async (native) => {
+    const signalGroup = vi.fn();
+    const host: ProcessOwnershipHost = {
+      platform: "linux",
+      listProcesses: async () => [launcher],
+      environment: async () => {
+        throw new LinuxEnvironmentImageOverwritten();
+      },
+      ...(native
+        ? {
+            processIdentities: async (
+              rows: readonly Pick<ProcessTableEntry, "pid">[],
+            ) =>
+              new Map(
+                rows.map(({ pid }) => {
+                  const row = [launcher].find(
+                    (candidate) => candidate.pid === pid,
+                  )!;
+                  return [row.pid, nativeIdentity(row)];
+                }),
+              ),
+          }
+        : {}),
+      signalGroup,
+    };
+    const ownership = {
+      runId: "owned",
+      leaderPid: launcher.pid,
+      processGroupId: launcher.processGroupId,
+      expectedParentPid: launcher.parentPid,
+      expectedCommand: launcher.command,
+    };
+    await expect(
+      observeOwnedProcessLineage(ownership, host),
+    ).resolves.toMatchObject({
+      status: "unavailable",
+      reason: overwrittenEnvironmentReason(launcher.pid),
+    });
+    await expect(
+      cleanupOwnedProcessGroup(ownership, host),
+    ).resolves.toMatchObject({
+      cleaned: false,
+      reason: overwrittenEnvironmentReason(launcher.pid),
+    });
+    expect(signalGroup).not.toHaveBeenCalled();
+  },
+);
+
+it("keeps a foreign run token ahead of an overwritten environ image", async () => {
+  const signalGroup = vi.fn();
+  const host: ProcessOwnershipHost = {
+    platform: "linux",
+    listProcesses: async () => [launcher, { ...child, processGroupId: 100 }],
+    environment: async (pid) => {
+      if (pid === child.pid) return { REA_PROCESS_RUN_ID: "foreign" };
+      throw new LinuxEnvironmentImageOverwritten();
+    },
+    signalGroup,
+  };
+  const ownership = {
+    runId: "owned",
+    leaderPid: launcher.pid,
+    processGroupId: launcher.processGroupId,
+    expectedParentPid: launcher.parentPid,
+    expectedCommand: launcher.command,
+  };
+  await expect(
+    observeOwnedProcessLineage(ownership, host),
+  ).resolves.toMatchObject({
+    status: "unavailable",
+    reason: overwrittenEnvironmentReason(launcher.pid),
+  });
+  await expect(
+    cleanupOwnedProcessGroup(ownership, host),
+  ).resolves.toMatchObject({
+    cleaned: false,
+    reason: "process ownership token mismatch for PID(s): 100, 101",
+  });
+  expect(signalGroup).not.toHaveBeenCalled();
+});
+
+it("does not signal a token-backed launcher whose child overwrote its environ image", async () => {
+  const signalGroup = vi.fn();
+  const zygote = {
+    ...child,
+    processGroupId: launcher.processGroupId,
+    command: "electron --type=zygote",
+  };
+  const evidenceOwner = new ProcessOwnershipEvidenceOwner();
+  const host: ProcessOwnershipHost = {
+    platform: "linux",
+    listProcesses: async () => [launcher, zygote],
+    environment: async (pid) => {
+      if (pid === launcher.pid) return { REA_PROCESS_RUN_ID: "owned" };
+      throw new LinuxEnvironmentImageOverwritten();
+    },
+    processIdentities: async (
+      rows: readonly Pick<ProcessTableEntry, "pid">[],
+    ) =>
+      new Map(
+        rows.map(({ pid }) => {
+          const row = [launcher, zygote].find(
+            (candidate) => candidate.pid === pid,
+          )!;
+          return [row.pid, nativeIdentity(row)];
+        }),
+      ),
+    signalGroup,
+  };
+  const ownership = {
+    runId: "owned",
+    leaderPid: launcher.pid,
+    processGroupId: launcher.processGroupId,
+    expectedParentPid: launcher.parentPid,
+    expectedCommand: launcher.command,
+    sweepTokenOwnedProcesses: true as const,
+    evidenceOwner,
+  };
+  await expect(
+    observeOwnedProcessLineage(ownership, host),
+  ).resolves.toMatchObject({
+    status: "unavailable",
+    reason: overwrittenEnvironmentReason(zygote.pid),
+  });
+  await expect(
+    cleanupOwnedProcessGroup(ownership, host),
+  ).resolves.toMatchObject({
+    cleaned: false,
+    reason: overwrittenEnvironmentReason(zygote.pid),
+  });
+  expect(signalGroup).not.toHaveBeenCalled();
+});
 
 it.each(
   (["parent", "group", "command"] as const).flatMap((mismatch) =>

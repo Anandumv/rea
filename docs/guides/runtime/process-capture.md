@@ -723,6 +723,14 @@ as well. A newly started unreadable process can prevent verified cleanup even
 after the selected command exits. REA preserves this uncertainty and leaves
 that process untouched.
 
+On Linux, Chromium-based processes can replace the memory behind
+`/proc/<pid>/environ` with NUL bytes or command-line text. `REA_PROCESS_RUN_ID`
+then cannot be read, even when the process still has the variable. REA reports
+that the image is not a variable list and leaves lineage ownership unverified.
+A variable list that merely omits the marker remains a missing-marker result.
+Neither result authorizes signaling that process. See
+[Electron observation](../javascript/electron-observation.md).
+
 Reading those tokens requires compiling a small Swift helper with `xcrun swiftc`.
 By default that compilation reuses Swift's shared module cache, while the
 compiler's intermediate objects stay inside the per-run temporary root that REA

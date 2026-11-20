@@ -18,6 +18,9 @@ import {
 import { launcherIdentityFailure } from "./ProcessOwnershipIdentity.js";
 import { descendantsOf, liveProcesses } from "./ProcessOwnershipProcessTree.js";
 import {
+  LINUX_ENVIRONMENT_IMAGE_OVERWRITTEN,
+  LinuxEnvironmentImageOverwritten,
+  overwrittenLinuxEnvironmentReason,
   processRunIdFromEnvironment,
   readProcessRunTokens,
 } from "./ProcessRunTokenObservations.js";
@@ -223,7 +226,15 @@ export interface ProcessOwnershipHost {
 
 /** Whether one live process exposed its ownership token to the host. */
 export type ProcessRunTokenObservation =
-  | { readonly state: "readable"; readonly runId: string | undefined }
+  | {
+      readonly state: "readable";
+      readonly runId: string | undefined;
+      /**
+       * Linux read the environ image, but it was not a variable list.
+       * `runId` is unknown, not an absence observed inside a variable list.
+       */
+      readonly environmentImage?: "overwritten";
+    }
   | {
       readonly state: "unavailable";
       readonly reason: string;
@@ -349,8 +360,16 @@ export const readProcessRunId = async (
   pid: number,
   host: ProcessOwnershipHost = systemHost,
   signal?: AbortSignal,
-): Promise<string | undefined> =>
-  processRunIdFromEnvironment(await host.environment(pid, signal));
+): Promise<string | undefined> => {
+  try {
+    return processRunIdFromEnvironment(await host.environment(pid, signal));
+  } catch (cause: unknown) {
+    // Sampling only needs the marker. An overwritten image has no marker to
+    // report; it is not a failed procfs read.
+    if (cause instanceof LinuxEnvironmentImageOverwritten) return undefined;
+    throw cause;
+  }
+};
 
 /** Merge duplicate uncertainty rows from discovery and final verification. */
 const mergeUnverifiedObservations = (
@@ -1323,21 +1342,27 @@ const cleanupValidationFailure = (
   const unreadable = failures.filter(
     ({ reason }) => reason === "environment-unreadable",
   );
-  if (failures.some(({ reason }) => reason === "run-token-mismatch"))
+  if (failures.some(({ reason }) => reason === "run-token-mismatch")) {
+    const mismatches = failures.filter(
+      ({ reason }) => reason === "run-token-mismatch",
+    );
+    const pids = [...new Set(mismatches.map(({ pid }) => pid))].sort(
+      (left, right) => left - right,
+    );
+    // A foreign token still outranks an overwritten image. Only an image that
+    // is not a variable list, on every mismatched member, uses that reason.
+    const overwritten = mismatches.every(
+      (failure) => failure.diagnostic === LINUX_ENVIRONMENT_IMAGE_OVERWRITTEN,
+    );
     return {
       cleaned: false,
-      reason: `process ownership token mismatch for PID(s): ${[
-        ...new Set(
-          failures
-            .filter(({ reason }) => reason === "run-token-mismatch")
-            .map(({ pid }) => pid),
-        ),
-      ]
-        .sort((left, right) => left - right)
-        .join(", ")}`,
+      reason: overwritten
+        ? overwrittenLinuxEnvironmentReason(pids)
+        : `process ownership token mismatch for PID(s): ${pids.join(", ")}`,
       failures,
       ...unverifiedEntry,
     };
+  }
   if (failures.some(({ reason }) => reason === "process-identity-unavailable"))
     return {
       cleaned: false,
@@ -1451,6 +1476,17 @@ const sanitizedTokenReadFailure = (diagnostic: string | undefined): string => {
   return "other_unavailable";
 };
 
+const mismatchedRunTokenFailure = (
+  pid: number,
+  token: Extract<ProcessRunTokenObservation, { readonly state: "readable" }>,
+): ProcessOwnershipValidationFailure => ({
+  pid,
+  reason: "run-token-mismatch",
+  ...(token.environmentImage === "overwritten"
+    ? { diagnostic: LINUX_ENVIRONMENT_IMAGE_OVERWRITTEN }
+    : {}),
+});
+
 const processOwnershipFailures = async (
   members: readonly ProcessTableEntry[],
   ownership: OwnedProcessGroup,
@@ -1546,7 +1582,7 @@ const processOwnershipFailures = async (
       if (fact.token.state === "unavailable") {
         failures.push(unreadableTokenFailure(fact, fact.token.reason));
       } else if (fact.token.runId !== runId) {
-        failures.push({ pid: fact.process.pid, reason: "run-token-mismatch" });
+        failures.push(mismatchedRunTokenFailure(fact.process.pid, fact.token));
       } else {
         validatedMembers.push(fact.process);
       }
@@ -1572,7 +1608,7 @@ const processRunTokenFailures = async (
   )) {
     if (observation.state === "readable") {
       if (observation.runId !== runId)
-        failures.push({ pid: member.pid, reason: "run-token-mismatch" });
+        failures.push(mismatchedRunTokenFailure(member.pid, observation));
       continue;
     }
     failures.push({
@@ -1901,15 +1937,16 @@ const scanWithOwnershipEvidence = async (
       fact.token.runId !== runId &&
       retainedCandidate !== undefined
     )
-      failures.push({
-        pid: fact.process.pid,
-        // An earlier observation without an identity cannot bind that
-        // observation to this currently readable process generation.
-        reason:
-          retainedCandidate.applicability === "identity-unresolved"
-            ? "process-identity-unavailable"
-            : "run-token-mismatch",
-      });
+      failures.push(
+        retainedCandidate.applicability === "identity-unresolved"
+          ? {
+              pid: fact.process.pid,
+              // An earlier observation without an identity cannot bind that
+              // observation to this currently readable process generation.
+              reason: "process-identity-unavailable",
+            }
+          : mismatchedRunTokenFailure(fact.process.pid, fact.token),
+      );
     if (fact.token.state !== "unavailable") continue;
     const relationBefore =
       fact.identityBefore.state === "readable"

@@ -11,6 +11,37 @@ import type {
 import { liveProcesses } from "./ProcessOwnershipProcessTree.js";
 import { errorMessage } from "../kernel/errorMessage.js";
 
+/** Stable diagnostic for a Linux environ image that is not a variable list. */
+export const LINUX_ENVIRONMENT_IMAGE_OVERWRITTEN =
+  "linux_environment_image_overwritten";
+
+/**
+ * Linux read `/proc/<pid>/environ`, but the bytes are not an environment
+ * variable list. Chromium's process-title support produces this image.
+ * The process id is known to the caller that caught this error.
+ */
+export class LinuxEnvironmentImageOverwritten extends Error {
+  readonly _tag = "LinuxEnvironmentImageOverwritten";
+  constructor() {
+    super(LINUX_ENVIRONMENT_IMAGE_OVERWRITTEN);
+    this.name = "LinuxEnvironmentImageOverwritten";
+  }
+}
+
+/** Lineage and cleanup wording for one or more overwritten environ images. */
+export const overwrittenLinuxEnvironmentReason = (
+  pids: readonly number[],
+): string => {
+  const listed = [...new Set(pids)]
+    .sort((left, right) => left - right)
+    .map((pid) => String(pid));
+  const subject =
+    listed.length === 1
+      ? `PID ${listed[0] ?? ""}`
+      : `PIDs ${listed.join(", ")}`;
+  return `Linux /proc environment image for ${subject} is not a variable list, so REA_PROCESS_RUN_ID cannot be read; Chromium-based processes overwrite this memory and lineage ownership remains unverified`;
+};
+
 /** Structured native token availability, distinct from failed reads and caller cancellation. */
 export class ProcessRunTokenReadError extends Error {
   readonly _tag = "ProcessRunTokenReadError";
@@ -50,6 +81,14 @@ export const readProcessRunToken = async (
       runId: processRunIdFromEnvironment(environment),
     };
   } catch (cause: unknown) {
+    // Keep this readable. An unavailable token would fail a whole-system sweep
+    // on every unrelated Chromium process, which is not ownership proof either.
+    if (cause instanceof LinuxEnvironmentImageOverwritten)
+      return {
+        state: "readable",
+        runId: undefined,
+        environmentImage: "overwritten",
+      };
     if (
       cause instanceof DarwinProcessOwnershipInspectionError &&
       (cause.cleanupOwner !== undefined || cause.cleanupFailure !== undefined)

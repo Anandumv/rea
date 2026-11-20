@@ -7,7 +7,10 @@ import {
   type ProcessTableEntry,
 } from "./ProcessOwnership.js";
 import { ProcessOwnershipInspectionCancelled } from "./ProcessInspectionCancellation.js";
-import { parseProcessEnvironment } from "./ProcessOwnershipObservation.js";
+import {
+  linuxEnvironmentImageOverwritten,
+  parseProcessEnvironment,
+} from "./ProcessOwnershipObservation.js";
 import { selectCapturedProcessGroupIds } from "./ProcessOwnershipProcessTree.js";
 import { matchesOwnedProcessCommand } from "./ProcessCommandIdentity.js";
 import { createOwnership, host } from "./ProcessOwnership.fixture.js";
@@ -58,6 +61,38 @@ describe("owned process-group cleanup discovery", () => {
       VALUE: "a=b",
     });
     expect(environment["toString"]).toBeUndefined();
+  });
+  it("distinguishes a Linux variable list from an overwritten environ image", () => {
+    expect(linuxEnvironmentImageOverwritten("")).toBe(false);
+    expect(linuxEnvironmentImageOverwritten("\0")).toBe(false);
+    expect(
+      linuxEnvironmentImageOverwritten(
+        "=ignored\0PATH=/bin\0REA_PROCESS_RUN_ID=owned\0",
+      ),
+    ).toBe(false);
+    expect(
+      linuxEnvironmentImageOverwritten("EMPTY=\0VALUE=a=b\0__proto__=kept\0"),
+    ).toBe(false);
+    expect(linuxEnvironmentImageOverwritten("\0".repeat(1927))).toBe(true);
+    expect(
+      linuxEnvironmentImageOverwritten(
+        `r --enable-crash-reporter=abc${"\0".repeat(80)}`,
+      ),
+    ).toBe(true);
+    expect(
+      linuxEnvironmentImageOverwritten(
+        `m=x11 --enable-crash-reporter=abc${"\0".repeat(80)}`,
+      ),
+    ).toBe(true);
+    expect(
+      linuxEnvironmentImageOverwritten("trace-process-track-uuid=abc\0"),
+    ).toBe(true);
+    expect(linuxEnvironmentImageOverwritten("m=x11\0")).toBe(false);
+    expect(
+      linuxEnvironmentImageOverwritten(
+        `REA_PROCESS_RUN_ID=owned${"\0".repeat(80)}`,
+      ),
+    ).toBe(false);
   });
   it("matches macOS executable names after process-table normalization", () => {
     expect(
