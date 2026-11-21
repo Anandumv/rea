@@ -22,6 +22,10 @@ export class ProgressiveToolCatalog {
     { registered: RegisteredTool; description: string; search: string }
   >;
 
+  private discoveryAdapter:
+    | { registered: RegisteredTool; description: string }
+    | undefined;
+
   constructor(
     registrations: ReadonlyMap<string, RegisteredTool>,
     identity: CatalogIdentity,
@@ -47,6 +51,18 @@ export class ProgressiveToolCatalog {
     this.reset();
   }
 
+  /**
+   * Record the discovery adapter after its SDK registration. It stays outside
+   * the cold snapshot, so connection reset cannot hide it, and an exact-name
+   * batch can accept the advertised name without treating it as unknown.
+   */
+  bindDiscoveryAdapter(registered: RegisteredTool): void {
+    this.discoveryAdapter = {
+      registered,
+      description: (registered.description ?? "").slice(0, 240),
+    };
+  }
+
   /** A reused HTTP server starts each new transport with the hot inventory. */
   reset(): void {
     this.batchChanges(() => {
@@ -60,7 +76,9 @@ export class ProgressiveToolCatalog {
   discover(input: z.infer<typeof DISCOVER_TOOLS.inputSchema>) {
     const names =
       input.names === undefined ? undefined : [...new Set(input.names)];
-    const unknown = names?.filter((name) => !this.tools.has(name)) ?? [];
+    // The adapter is advertised and already loaded, but it is not a cold row.
+    const unknown =
+      names?.filter((name) => this.advertised(name) === undefined) ?? [];
     if (unknown.length > 0)
       return this.delivery().toErrorToolResult(
         new AnalysisInputError(
@@ -99,9 +117,14 @@ export class ProgressiveToolCatalog {
         });
     const page =
       names ?? matches.slice(input.offset, input.offset + input.limit);
-    const selected = page.map((name) => ({ name, ...this.tools.get(name)! }));
+    const selected = page.map((name) => ({
+      name,
+      ...this.advertised(name)!,
+    }));
     const result: z.infer<typeof DISCOVER_TOOLS.outputSchema> = {
       profile: "hot-cold",
+      // The adapter is outside this snapshot, so inventory and the loaded
+      // baseline count it separately from cold tools.
       inventory_count: this.tools.size + 1,
       loaded_count:
         1 +
@@ -161,5 +184,14 @@ export class ProgressiveToolCatalog {
       content: [{ type: "text" as const, text: encoded.text }],
       structuredContent: payload,
     };
+  }
+
+  private advertised(
+    name: string,
+  ): { registered: RegisteredTool; description: string } | undefined {
+    return (
+      this.tools.get(name) ??
+      (name === DISCOVER_TOOLS.name ? this.discoveryAdapter : undefined)
+    );
   }
 }

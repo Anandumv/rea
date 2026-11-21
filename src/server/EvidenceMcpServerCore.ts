@@ -336,10 +336,11 @@ export class EvidenceMcpServerCore extends RequestTrackingMcpServer {
     );
     this.progressiveCatalog = catalog;
     const { name, ...config } = DISCOVER_TOOLS;
-    // Transport discovery has no target or analysis lifecycle. Domain tools
-    // continue through registerTool and their original named handlers. Its
-    // advertisement still follows the selected input presentation.
-    super.registerTool(
+    // Transport discovery has no target or analysis lifecycle, so it is
+    // registered on the SDK directly instead of through registerTool. That
+    // keeps it out of the cold snapshot reset() disables. Record the same
+    // registration so an exact-name batch accepts this advertised name.
+    const registered = super.registerTool(
       name,
       { ...config, ...this.presentInput(name, config) },
       (input, context) => {
@@ -347,6 +348,7 @@ export class EvidenceMcpServerCore extends RequestTrackingMcpServer {
         return catalog.discover(input);
       },
     );
+    catalog.bindDiscoveryAdapter(registered);
   }
 
   override sendToolListChanged(): void {

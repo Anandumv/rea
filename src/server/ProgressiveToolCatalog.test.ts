@@ -179,6 +179,78 @@ it("batches visibility changes, pages searches, and keeps excluded tools outside
   expect(f.forbidden).not.toHaveBeenCalled();
 });
 
+it("accepts the advertised discover_tools name in an exact-name batch", async () => {
+  const f = await connect();
+  const listed = async () => (await f.client.listTools()).tools;
+  const initial = await listed();
+  const adapter = initial.find(({ name }) => name === "discover_tools");
+  if (adapter === undefined) throw new Error("Missing discover_tools");
+  const self = await f.discover({ names: ["discover_tools"] });
+  expect(self.isError).not.toBe(true);
+  expect(self.structuredContent).toMatchObject({
+    loaded_count: initial.length,
+    total_matches: 1,
+    tools: [
+      {
+        name: "discover_tools",
+        description: (adapter.description ?? "").slice(0, 240),
+        input_schema: adapter.inputSchema,
+      },
+    ],
+  });
+  expect(await listed()).toEqual(initial);
+  expect(f.changed).not.toHaveBeenCalled();
+  const withHot = await f.discover({
+    names: ["binary_session", "discover_tools"],
+  });
+  expect(withHot.isError).not.toBe(true);
+  expect(withHot.structuredContent).toMatchObject({
+    loaded_count: initial.length,
+    total_matches: 2,
+    tools: [{ name: "binary_session" }, { name: "discover_tools" }],
+  });
+  expect(f.changed).not.toHaveBeenCalled();
+  const mixed = await f.discover({
+    names: ["alpha_sqlite", "discover_tools", "discover_tools"],
+  });
+  expect(mixed.isError).not.toBe(true);
+  expect(mixed.structuredContent).toMatchObject({
+    loaded_count: initial.length + 1,
+    total_matches: 2,
+    tools: [
+      { name: "alpha_sqlite" },
+      { name: "discover_tools", input_schema: adapter.inputSchema },
+    ],
+  });
+  expect(f.changed).toHaveBeenCalledTimes(1);
+  expect((await listed()).map(({ name }) => name)).toEqual([
+    "binary_session",
+    "alpha_sqlite",
+    "discover_tools",
+  ]);
+  const rejected = await f.discover({
+    names: ["beta_sqlite", "discover_tools", "excluded_sqlite", "missing"],
+  });
+  expect(parseMcpToolError(rejected)).toMatchObject({
+    error: {
+      code: "invalid_request",
+      details: {
+        issues: [
+          { path: ["names"], message: "excluded_sqlite" },
+          { path: ["names"], message: "missing" },
+        ],
+      },
+    },
+  });
+  expect(f.forbidden).not.toHaveBeenCalled();
+  expect(f.changed).toHaveBeenCalledTimes(1);
+  expect((await listed()).map(({ name }) => name)).toEqual([
+    "binary_session",
+    "alpha_sqlite",
+    "discover_tools",
+  ]);
+});
+
 it("loads exact names atomically and emits one notification for a batch", async () => {
   const f = await connect();
   expect(
