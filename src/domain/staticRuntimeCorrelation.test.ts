@@ -6,6 +6,7 @@ import {
   artifactComparisonResultSchema,
   compareArtifacts,
 } from "./artifactComparison.js";
+import { memberInventoryEvidence } from "./staticRuntimeCorrelation.fixture.js";
 import { findChangedBehavior } from "./changedBehavior.js";
 import { ARTIFACT_COMPARISON_PROVIDER } from "./comparisonEvidenceIdentity.js";
 import {
@@ -619,4 +620,343 @@ describe("static/runtime correlation citation closure", () => {
       );
     },
   );
+});
+
+const UNCHANGED_MEMBER = "1".repeat(64);
+const LEFT_CHANGED_MEMBER = "2".repeat(64);
+const RIGHT_CHANGED_MEMBER = "3".repeat(64);
+const UNCHANGED_PATH = "lib/deep/x.js";
+const CHANGED_PATH = "lib/a.js";
+
+const pairedMemberInventories = (
+  coverage: { scope: "container-entries"; status: "complete" | "unknown" } = {
+    scope: "container-entries",
+    status: "complete",
+  },
+) => {
+  const left = memberInventoryEvidence(
+    [
+      { path: CHANGED_PATH, sha256: LEFT_CHANGED_MEMBER },
+      { path: UNCHANGED_PATH, sha256: UNCHANGED_MEMBER },
+    ],
+    "a".repeat(64),
+    coverage,
+  );
+  const right = memberInventoryEvidence(
+    [
+      { path: CHANGED_PATH, sha256: RIGHT_CHANGED_MEMBER },
+      { path: UNCHANGED_PATH, sha256: UNCHANGED_MEMBER },
+    ],
+    "b".repeat(64),
+    coverage,
+  );
+  return { left, right };
+};
+
+const memberComparisonEvidence = (
+  left: Evidence,
+  right: Evidence,
+  result: ReturnType<typeof compareArtifacts> = compareArtifacts(left, right),
+): Evidence =>
+  createEvidence(
+    unknownTarget("derived-from-linked-evidence"),
+    ARTIFACT_COMPARISON_PROVIDER,
+    {
+      predicateType: "rea.artifact-comparison",
+      operation: "compare_artifacts",
+      parameters: {
+        left_evidence_ids: [left.evidence_id],
+        right_evidence_ids: [right.evidence_id],
+      },
+      result,
+      confidence: "derived",
+      authority: "analyst-inference",
+      limitations: result.limitations,
+      evidenceLinks: [left.evidence_id, right.evidence_id],
+    },
+  );
+
+const unchangedMemberRuntime = processComparison("changed");
+const unchangedMemberPair = pairedMemberInventories();
+const unchangedMemberCompared = compareArtifacts(
+  unchangedMemberPair.left,
+  unchangedMemberPair.right,
+);
+const unchangedMemberComparison = memberComparisonEvidence(
+  unchangedMemberPair.left,
+  unchangedMemberPair.right,
+  unchangedMemberCompared,
+);
+const unchangedMemberById = (id: string): Evidence | undefined =>
+  id === unchangedMemberPair.left.evidence_id
+    ? unchangedMemberPair.left
+    : id === unchangedMemberPair.right.evidence_id
+      ? unchangedMemberPair.right
+      : undefined;
+
+const correlateMember = (
+  path: string,
+  pattern: "cochanged" | "runtime_only" | "both_unchanged",
+  dimension: "terminal" | "exit",
+  sources?: { readonly evidenceById: (id: string) => Evidence | undefined },
+  staticComparison: Evidence = unchangedMemberComparison,
+) =>
+  correlateStaticAndRuntime(
+    {
+      static_comparisons: [staticComparison],
+      runtime_comparisons: [unchangedMemberRuntime],
+      mappings: [
+        {
+          static: {
+            comparison_evidence_id: staticComparison.evidence_id,
+            selector: { kind: "artifact" as const, logical_path: path },
+          },
+          runtime: {
+            comparison_evidence_id: unchangedMemberRuntime.evidence_id,
+            dimension,
+          },
+          side_alignment: "left_to_left" as const,
+          hypothesis: {
+            statement: "Compare selected observations.",
+            expected_pattern: pattern,
+          },
+        },
+      ],
+    },
+    sources,
+  );
+
+describe("unchanged artifact members in static/runtime correlation", () => {
+  it("counts the identical member as unchanged and omits it from deltas", () => {
+    expect(unchangedMemberCompared.summary).toMatchObject({
+      unchanged: 1,
+      added: 0,
+      removed: 0,
+      changed: 2,
+      unknown: 0,
+      contradiction: 0,
+    });
+    expect(
+      unchangedMemberCompared.changes
+        .map(({ logical_path: path }) => path)
+        .sort(),
+    ).toEqual([".", CHANGED_PATH].sort());
+    expect(unchangedMemberRuntime.normalized_result).toMatchObject({
+      terminal: "changed",
+      exit: "unchanged",
+    });
+  });
+
+  it("evaluates runtime_only and both_unchanged for a unique unchanged member", () => {
+    const sources = { evidenceById: unchangedMemberById };
+    expect(
+      correlateMember(UNCHANGED_PATH, "runtime_only", "terminal", sources),
+    ).toMatchObject({
+      status: "correlated",
+      summary: { hypotheses: 1, contradictions: 0, unresolved: 0 },
+      correlations: {
+        items: [
+          {
+            observed_pattern: "runtime_only",
+            classification: "hypothesis",
+            static: { status: "unchanged" },
+            runtime: { dimension: "terminal", status: "changed" },
+          },
+        ],
+      },
+    });
+    expect(
+      correlateMember(UNCHANGED_PATH, "both_unchanged", "exit", sources),
+    ).toMatchObject({
+      status: "correlated",
+      summary: { hypotheses: 1, contradictions: 0, unresolved: 0 },
+      correlations: {
+        items: [
+          {
+            observed_pattern: "both_unchanged",
+            classification: "hypothesis",
+            static: { status: "unchanged" },
+            runtime: { dimension: "exit", status: "unchanged" },
+          },
+        ],
+      },
+    });
+  });
+
+  it("still evaluates a changed member, including a contradicted runtime_only hypothesis", () => {
+    expect(
+      correlateMember(CHANGED_PATH, "cochanged", "terminal", {
+        evidenceById: unchangedMemberById,
+      }),
+    ).toMatchObject({
+      status: "correlated",
+      correlations: {
+        items: [
+          {
+            observed_pattern: "cochanged",
+            classification: "hypothesis",
+            static: { status: "changed" },
+          },
+        ],
+      },
+    });
+    expect(
+      correlateMember(CHANGED_PATH, "runtime_only", "terminal"),
+    ).toMatchObject({
+      status: "contradicted",
+      summary: { hypotheses: 0, contradictions: 1, unresolved: 0 },
+      correlations: {
+        items: [
+          {
+            observed_pattern: "cochanged",
+            classification: "contradiction",
+            static: { status: "changed" },
+          },
+        ],
+      },
+    });
+  });
+});
+
+describe("unresolved unchanged artifact selectors", () => {
+  it("leaves a missing delta unresolved when source inventories cannot establish unchanged", () => {
+    const withoutSources = correlateMember(
+      UNCHANGED_PATH,
+      "runtime_only",
+      "terminal",
+    );
+    expect(withoutSources).toMatchObject({
+      status: "unknown",
+      summary: { hypotheses: 0, contradictions: 0, unresolved: 1 },
+      correlations: {
+        items: [
+          {
+            observed_pattern: "unknown",
+            classification: "unresolved_branch",
+            static: { status: "unknown" },
+          },
+        ],
+      },
+    });
+    expect(withoutSources.correlations.items[0]?.limitations.join(" ")).toMatch(
+      /not a reported delta/u,
+    );
+    expect(withoutSources.correlations.items[0]?.limitations.join(" ")).toMatch(
+      /source inventories are not available/u,
+    );
+
+    const absent = correlateMember(
+      "lib/missing.js",
+      "runtime_only",
+      "terminal",
+      {
+        evidenceById: unchangedMemberById,
+      },
+    );
+    expect(absent.correlations.items[0]).toMatchObject({
+      classification: "unresolved_branch",
+      static: { status: "unknown" },
+    });
+    expect(absent.correlations.items[0]?.limitations.join(" ")).toMatch(
+      /not observed exactly once/u,
+    );
+
+    const incompleteInventories = pairedMemberInventories({
+      scope: "container-entries",
+      status: "unknown",
+    });
+    const incompleteComparison = memberComparisonEvidence(
+      incompleteInventories.left,
+      incompleteInventories.right,
+    );
+    expect(incompleteComparison.normalized_result).toMatchObject({
+      summary: { unchanged: 0 },
+    });
+    const incomplete = correlateMember(
+      UNCHANGED_PATH,
+      "both_unchanged",
+      "exit",
+      {
+        evidenceById: (id) =>
+          id === incompleteInventories.left.evidence_id
+            ? incompleteInventories.left
+            : id === incompleteInventories.right.evidence_id
+              ? incompleteInventories.right
+              : undefined,
+      },
+      incompleteComparison,
+    );
+    expect(incomplete.correlations.items[0]).toMatchObject({
+      classification: "unresolved_branch",
+      static: { status: "unknown" },
+    });
+    expect(incomplete.correlations.items[0]?.limitations.join(" ")).toMatch(
+      /incomplete inventory coverage/u,
+    );
+  });
+
+  it("does not treat a cited omission as unchanged when the source inventories disagree", () => {
+    const forged = artifactComparisonResultSchema.parse({
+      ...unchangedMemberCompared,
+      changes: unchangedMemberCompared.changes.filter(
+        ({ logical_path: path }) => path !== CHANGED_PATH,
+      ),
+    });
+    const cited = memberComparisonEvidence(
+      unchangedMemberPair.left,
+      unchangedMemberPair.right,
+      forged,
+    );
+    const result = correlateMember(
+      CHANGED_PATH,
+      "runtime_only",
+      "terminal",
+      { evidenceById: unchangedMemberById },
+      cited,
+    );
+    expect(result.correlations.items[0]).toMatchObject({
+      classification: "unresolved_branch",
+      observed_pattern: "unknown",
+      static: { status: "unknown" },
+    });
+    expect(result.correlations.items[0]?.limitations.join(" ")).toMatch(
+      /do not establish it as unchanged/u,
+    );
+  });
+
+  it("rejects an artifact selector that matches more than one reported delta", () => {
+    const duplicate = artifactComparisonResultSchema.parse({
+      ...unchangedMemberCompared,
+      changes: [
+        unchangedMemberCompared.changes[0],
+        unchangedMemberCompared.changes[0],
+      ],
+    });
+    const cited = memberComparisonEvidence(
+      unchangedMemberPair.left,
+      unchangedMemberPair.right,
+      duplicate,
+    );
+    expect(() =>
+      correlateMember(
+        duplicate.changes[0]!.logical_path,
+        "cochanged",
+        "terminal",
+        undefined,
+        cited,
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        _tag: "AnalysisInputError",
+        userMessage:
+          "Artifact selector must resolve exactly one reported delta",
+        issues: [
+          expect.objectContaining({
+            path: ["mappings", 0, "static", "selector"],
+            reason: "invalid_value",
+          }),
+        ],
+      }),
+    );
+  });
 });

@@ -8,8 +8,10 @@ import {
   type ArtifactOccurrence,
 } from "./artifactGraph.js";
 import { AnalysisInputError } from "./analysisErrorCore.js";
+import { EvidenceIntegrityError } from "./evidenceErrors.js";
 import {
   ArtifactInventoryCarrierError,
+  ArtifactInventoryValidationError,
   hasCompleteInventoryCoverage,
   parseArtifactInventoryEvidence,
   type InventorySet,
@@ -135,6 +137,43 @@ const comparisonInventory = (input: unknown, side: "left" | "right") => {
   }
 };
 
+/** Shared coverage decision for comparison status and unchanged path selection. */
+const inventoryPairCoverage = (
+  left: InventorySet,
+  right: InventorySet,
+): {
+  readonly sameScope: boolean;
+  readonly rootCoverageComplete: boolean;
+  readonly entryCoverageComplete: boolean;
+  readonly fullyCovered: boolean;
+} => {
+  const sameScope = left.coverage.scope === right.coverage.scope;
+  const rootCoverageComplete =
+    sameScope &&
+    left.complete &&
+    right.complete &&
+    left.coverage.status === "complete" &&
+    right.coverage.status === "complete";
+  const entryCoverageComplete =
+    rootCoverageComplete && left.coverage.scope === "container-entries";
+  const leftCovered =
+    sameScope && hasCompleteInventoryCoverage(left, left.coverage.scope);
+  const rightCovered =
+    sameScope && hasCompleteInventoryCoverage(right, right.coverage.scope);
+  return {
+    sameScope,
+    rootCoverageComplete,
+    entryCoverageComplete,
+    fullyCovered:
+      leftCovered &&
+      rightCovered &&
+      (entryCoverageComplete ||
+        (rootCoverageComplete &&
+          left.manifest.occurrence_count === 1 &&
+          right.manifest.occurrence_count === 1)),
+  };
+};
+
 /** Compare complete inventory evidence without treating missing evidence as equality. */
 export const compareArtifacts = (
   leftEvidence: unknown,
@@ -144,33 +183,12 @@ export const compareArtifacts = (
   const right = comparisonInventory(rightEvidence, "right");
   const leftComplete = left.inventory.complete;
   const rightComplete = right.inventory.complete;
-  const sameScope =
-    left.inventory.coverage.scope === right.inventory.coverage.scope;
-  const rootCoverageComplete =
-    sameScope &&
-    left.inventory.complete &&
-    right.inventory.complete &&
-    left.inventory.coverage.status === "complete" &&
-    right.inventory.coverage.status === "complete";
-  const entryCoverageComplete =
-    rootCoverageComplete &&
-    left.inventory.coverage.scope === "container-entries";
-  const leftCovered =
-    sameScope &&
-    hasCompleteInventoryCoverage(left.inventory, left.inventory.coverage.scope);
-  const rightCovered =
-    sameScope &&
-    hasCompleteInventoryCoverage(
-      right.inventory,
-      right.inventory.coverage.scope,
-    );
-  const fullyCovered =
-    leftCovered &&
-    rightCovered &&
-    (entryCoverageComplete ||
-      (rootCoverageComplete &&
-        left.inventory.manifest.occurrence_count === 1 &&
-        right.inventory.manifest.occurrence_count === 1));
+  const {
+    sameScope,
+    rootCoverageComplete,
+    entryCoverageComplete,
+    fullyCovered,
+  } = inventoryPairCoverage(left.inventory, right.inventory);
   const leftOccurrencesByPath = occurrencesByPath(left.inventory.occurrences);
   const rightOccurrencesByPath = occurrencesByPath(right.inventory.occurrences);
   const comparison = compareOccurrences(
@@ -259,6 +277,54 @@ export const compareArtifacts = (
     ].sort(compareUnicodeCodePoints),
     limitations: [...new Set(limitations)].sort(compareUnicodeCodePoints),
   });
+};
+
+/** Why an omitted path is not an affirmative unchanged observation. */
+type UnchangedArtifactPathGap =
+  | "unreadable"
+  | "absent"
+  | "incomplete"
+  | "not_unchanged";
+
+type UnchangedArtifactPath =
+  | { readonly kind: "unchanged" }
+  | { readonly kind: "unresolved"; readonly gap: UnchangedArtifactPathGap };
+
+/**
+ * Decide whether source inventories establish one path omitted from `changes`
+ * as unchanged. Absence, incomplete coverage, and a source delta are not
+ * unchanged content.
+ */
+export const readUnchangedArtifactPath = (
+  leftEvidence: unknown,
+  rightEvidence: unknown,
+  logicalPath: string,
+): UnchangedArtifactPath => {
+  try {
+    const left = parseArtifactInventoryEvidence(leftEvidence);
+    const right = parseArtifactInventoryEvidence(rightEvidence);
+    const compared = compareArtifacts(leftEvidence, rightEvidence);
+    if (compared.changes.some(({ logical_path: path }) => path === logicalPath))
+      return { kind: "unresolved", gap: "not_unchanged" };
+    const occurrences = (inventory: InventorySet) =>
+      inventory.occurrences.filter(
+        ({ logical_path: path }) => path === logicalPath,
+      ).length;
+    if (occurrences(left.inventory) !== 1 || occurrences(right.inventory) !== 1)
+      return { kind: "unresolved", gap: "absent" };
+    if (!inventoryPairCoverage(left.inventory, right.inventory).fullyCovered)
+      return { kind: "unresolved", gap: "incomplete" };
+    return { kind: "unchanged" };
+  } catch (cause: unknown) {
+    if (
+      cause instanceof AnalysisInputError ||
+      cause instanceof EvidenceIntegrityError ||
+      cause instanceof ArtifactInventoryCarrierError ||
+      cause instanceof ArtifactInventoryValidationError
+    )
+      return { kind: "unresolved", gap: "unreadable" };
+    throw cause;
+  }
 };
 
 const compareOccurrences = (

@@ -223,7 +223,9 @@ export const correlateStaticAndRuntimeEvidence = (
   );
   if (!selected.ok) return selected;
   try {
-    const result = correlateStaticAndRuntime(selected.value.input);
+    const result = correlateStaticAndRuntime(selected.value.input, {
+      evidenceById: (evidenceId) => reader.evidenceForAnalysis(evidenceId),
+    });
     const sources = [
       ...selected.value.input.static_comparisons,
       ...selected.value.input.runtime_comparisons,

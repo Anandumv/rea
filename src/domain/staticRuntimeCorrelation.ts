@@ -7,7 +7,10 @@ import { analysisInputErrorFromIssues } from "./inputIssueProjection.js";
 import { readEvidence } from "./evidenceValidation.js";
 import { uniqueSorted } from "./canonicalOrdering.js";
 import { compareUnicodeCodePoints } from "./unicodeCodePointOrder.js";
-import { comparisonSourceEvidenceIds } from "./comparisonSourceEvidence.js";
+import {
+  comparisonSourceEvidenceIds,
+  comparisonSourceEvidenceSides,
+} from "./comparisonSourceEvidence.js";
 import {
   readComparisonResult,
   type ParsedComparisonEvidence,
@@ -15,6 +18,7 @@ import {
 import { evidenceSchema, type Evidence } from "./evidence.js";
 import { hasComparisonEvidenceIdentity } from "./comparisonEvidenceIdentity.js";
 import { functionComparisonDimensionNameSchema } from "./functionComparisonSchemas.js";
+import { readUnchangedArtifactPath } from "./artifactComparison.js";
 import type { JsonValue } from "./jsonValue.js";
 import {
   comparisonStatusSchema,
@@ -148,9 +152,15 @@ type StaticComparison = ParsedComparisonEvidence<
 >;
 type RuntimeComparison = ParsedComparisonEvidence<"compare_process_captures">;
 
+/** Session lookup for comparison source inventories. */
+interface StaticRuntimeSourceLookup {
+  readonly evidenceById: (evidenceId: string) => Evidence | undefined;
+}
+
 /** Correlate only caller-declared static/runtime hypotheses. */
 export const correlateStaticAndRuntime = (
   input: unknown,
+  sources?: StaticRuntimeSourceLookup,
 ): StaticRuntimeCorrelationResult => {
   const parsed = staticRuntimeCorrelationEnvelopeSchema.safeParse(input);
   if (!parsed.success)
@@ -181,7 +191,14 @@ export const correlateStaticAndRuntime = (
   const staticById = byId(staticEvidence);
   const runtimeById = byId(runtimeEvidence);
   const correlations = data.mappings.map((mapping, index) =>
-    correlate(mapping, staticById, runtimeById, input, index),
+    correlate(
+      mapping,
+      staticById,
+      runtimeById,
+      input,
+      index,
+      sources?.evidenceById,
+    ),
   );
   const duplicateMappingIndex = firstDuplicateIndex(
     correlations.map(({ correlation_id }) => correlation_id),
@@ -237,6 +254,7 @@ const correlate = (
   runtimeById: ReadonlyMap<string, RuntimeComparison>,
   input: unknown,
   mappingIndex: number,
+  evidenceById: StaticRuntimeSourceLookup["evidenceById"] | undefined,
 ): CorrelationItem => {
   const staticEvidence = required(
     staticById,
@@ -257,6 +275,7 @@ const correlate = (
     mapping.static.selector,
     input,
     ["mappings", mappingIndex, "static", "selector"],
+    evidenceById,
   );
   const process = runtimeEvidence.result;
   const runtimeStatus = process[mapping.runtime.dimension];
@@ -298,11 +317,31 @@ const correlate = (
   });
 };
 
+const unchangedPathLimitation = (
+  logicalPath: string,
+  gap: "unavailable" | "unreadable" | "absent" | "incomplete" | "not_unchanged",
+): string => {
+  const path = `Artifact path ${logicalPath} is not a reported delta`;
+  switch (gap) {
+    case "unavailable":
+      return `${path}, and the comparison source inventories are not available. Retain both inventory Evidence records, or select a reported delta.`;
+    case "unreadable":
+      return `${path}, and the comparison source closure could not be read as artifact inventories.`;
+    case "absent":
+      return `${path}, and it was not observed exactly once in both source inventories. An absent path is not an unchanged observation.`;
+    case "incomplete":
+      return `${path}, and incomplete inventory coverage cannot establish that it is unchanged.`;
+    case "not_unchanged":
+      return `${path}, and the source inventories do not establish it as unchanged.`;
+  }
+};
+
 const selectStatic = (
   comparison: StaticComparison,
   selector: z.infer<typeof staticSelectorSchema>,
   input: unknown,
   path: readonly (string | number)[],
+  evidenceById: StaticRuntimeSourceLookup["evidenceById"] | undefined,
 ): Pick<CorrelationItem["static"], "status" | "conclusion_kind"> & {
   readonly limitations: readonly string[];
 } => {
@@ -333,26 +372,78 @@ const selectStatic = (
     );
   const result = comparison.result;
   const matches = result.changes.filter(
-    ({ logical_path: path }) => path === selector.logical_path,
+    ({ logical_path: changePath }) => changePath === selector.logical_path,
   );
-  const match = matches.at(0);
-  if (matches.length !== 1 || match === undefined)
+  if (matches.length > 1)
     throw callerInputError(
       input,
       path,
       "Artifact selector must resolve exactly one reported delta",
     );
-  const status = match.classification;
-  return {
-    status,
-    limitations: [],
-    conclusion_kind:
-      status === "contradiction"
-        ? "contradiction"
-        : status === "unknown"
-          ? "unresolved_branch"
-          : "derived_relationship",
-  };
+  const match = matches[0];
+  if (match !== undefined) {
+    const status = match.classification;
+    return {
+      status,
+      limitations: [],
+      conclusion_kind:
+        status === "contradiction"
+          ? "contradiction"
+          : status === "unknown"
+            ? "unresolved_branch"
+            : "derived_relationship",
+    };
+  }
+  return selectUnchangedArtifact(
+    comparison,
+    selector.logical_path,
+    evidenceById,
+  );
+};
+
+const selectUnchangedArtifact = (
+  comparison: StaticComparison,
+  logicalPath: string,
+  evidenceById: StaticRuntimeSourceLookup["evidenceById"] | undefined,
+): Pick<CorrelationItem["static"], "status" | "conclusion_kind"> & {
+  readonly limitations: readonly string[];
+} => {
+  const unresolved = (
+    gap: Parameters<typeof unchangedPathLimitation>[1],
+  ): Pick<CorrelationItem["static"], "status" | "conclusion_kind"> & {
+    readonly limitations: readonly string[];
+  } => ({
+    status: "unknown",
+    conclusion_kind: "unresolved_branch",
+    limitations: [unchangedPathLimitation(logicalPath, gap)],
+  });
+  if (evidenceById === undefined) return unresolved("unavailable");
+  const sides = comparisonSourceEvidenceSides(comparison.evidence);
+  const left = sourceRecords(sides.left, evidenceById);
+  const right = sourceRecords(sides.right, evidenceById);
+  if (left === undefined || right === undefined)
+    return unresolved("unavailable");
+  const observation = readUnchangedArtifactPath(left, right, logicalPath);
+  if (observation.kind === "unchanged")
+    return {
+      status: "unchanged",
+      conclusion_kind: "derived_relationship",
+      limitations: [],
+    };
+  return unresolved(observation.gap);
+};
+
+const sourceRecords = (
+  ids: readonly string[],
+  evidenceById: StaticRuntimeSourceLookup["evidenceById"],
+): readonly Evidence[] | undefined => {
+  const records: Evidence[] = [];
+  for (const id of ids) {
+    const record = evidenceById(id);
+    if (record === undefined) return undefined;
+    records.push(record);
+  }
+  return records;
 };
 
 const parseStatic = (
