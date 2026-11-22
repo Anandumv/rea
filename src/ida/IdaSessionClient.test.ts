@@ -97,6 +97,13 @@ const fixture = async (
   return { root, target, producer, client };
 };
 
+/**
+ * The ida-pro-mcp supervisor's completed `idb_open` reply when
+ * `IDA_MCP_OPEN_TIMEOUT` reaps the worker mid-open.
+ */
+const supervisorOpenTimeoutReply = (seconds: number, path: string): string =>
+  `idalib worker timed out after ${String(seconds)}s while opening and analyzing ${path}. The binary may drive auto-analysis into an unbounded loop. Retry with run_auto_analysis=false (open without analysis and decompile on demand), or raise IDA_MCP_OPEN_TIMEOUT.`;
+
 it.each([
   new Error("HTTP 404: fixture response"),
   new ProviderAdapterError("ida", "transport", {
@@ -1671,7 +1678,54 @@ describe("headless IDA unresolved successful-open ownership", () => {
         ? { error: "Input was rejected before creating a session" }
         : undefined;
 
-    expect((await client.execute("health", {})).ok).toBe(false);
+    const result = await client.execute("health", {});
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(projectAnalysisError(result.error).code).toBe("unreadable_output");
+    expect((await client.close()).ok).toBe(true);
+    expect(producer.calls.some(({ name }) => name === "idb_close")).toBe(false);
+    expect(producer.closes).toBe(1);
+    expect(await readdir(root)).toEqual(["target.elf"]);
+  });
+
+  it("reports a supervisor worker-open deadline as provider_timeout", async () => {
+    const { producer, client, root } = await fixture("headless", 300_000);
+    const input = "/samples/large binary.exe";
+    const reason = supervisorOpenTimeoutReply(1800, input);
+    producer.overrideCall = (name) =>
+      name === "idb_open" ? { error: reason } : undefined;
+
+    const result = await client.execute("health", {});
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const projected = projectAnalysisError(result.error);
+    expect(projected).toMatchObject({
+      code: "provider_timeout",
+      category: "timeout",
+      retryable: true,
+      message: expect.stringContaining("IDA_MCP_OPEN_TIMEOUT"),
+      remediation: { action: expect.stringContaining("IDA_MCP_OPEN_TIMEOUT") },
+      recovery: {
+        kind: "inspect_timeout_state",
+        operation: "health",
+        timeout_ms: 1_800_000,
+      },
+      details: {
+        operation: "health",
+        timeout_ms: 1_800_000,
+        diagnostics: {
+          startup_operation: "idb_open",
+          deadline_source: "IDA_MCP_OPEN_TIMEOUT",
+          deadline_owner: "ida-pro-mcp",
+          deadline_seconds: 1800,
+          reason,
+        },
+      },
+    });
+    expect(projected.message).toContain("1800");
+    expect(JSON.stringify(projected)).not.toContain("rea doctor");
+    expect(projected.details).not.toMatchObject({ timeout_ms: 300_000 });
     expect((await client.close()).ok).toBe(true);
     expect(producer.calls.some(({ name }) => name === "idb_close")).toBe(false);
     expect(producer.closes).toBe(1);

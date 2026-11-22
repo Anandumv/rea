@@ -37,7 +37,10 @@ import {
   type HexRaysCloseReceipt,
   type HexRaysStatus,
 } from "./IdaHexRaysProtocol.js";
-import { idaCompatibilityProfile } from "./IdaConfiguration.js";
+import {
+  idaCompatibilityProfile,
+  idaSupervisorOpenTimeoutGuidance,
+} from "./IdaConfiguration.js";
 import { createIdaDiagnosticRedactor } from "./IdaDiagnosticRedactor.js";
 import { nativeTools } from "./IdaNativeProtocol.js";
 import { readSettledHealth } from "./IdaBusyHealth.js";
@@ -64,6 +67,7 @@ import {
   modernHealthSchema,
   openDatabaseSchema,
   rejectedOpenDatabaseSchema,
+  supervisorOpenDeadline,
 } from "./IdaProtocolValues.js";
 import {
   idaFileDigest,
@@ -804,6 +808,15 @@ export class IdaSessionClient implements AnalysisClient {
       ? "no_worker"
       : "reply_received";
     this.#lifecycle.push(raw);
+    const deadline = supervisorOpenDeadline(raw);
+    if (deadline !== undefined) {
+      const guidance = idaSupervisorOpenTimeoutGuidance(deadline.seconds);
+      throw new AnalysisTimeoutError("idb_open", guidance.timeoutMs, {
+        userMessage: guidance.userMessage,
+        remediationAction: guidance.remediationAction,
+        diagnostics: { ...guidance.diagnostics, reason: deadline.reason },
+      });
+    }
     const opened = openDatabaseSchema.parse(raw);
     if (!sameIdaHostPath(opened.session.input_path, workspace.inputPath))
       throw new IdaIdentityRefusal(

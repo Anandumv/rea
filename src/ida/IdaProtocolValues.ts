@@ -219,6 +219,32 @@ export const rejectedOpenDatabaseSchema = z
   })
   .passthrough();
 
+/**
+ * The supervisor's completed `idb_open` sentence when `IDA_MCP_OPEN_TIMEOUT`
+ * reaps the worker. The seconds are that deadline, in the producer's unit.
+ */
+const SUPERVISOR_OPEN_DEADLINE =
+  /^idalib worker timed out after (\d+)s while opening and analyzing [\s\S]+?\. The binary may drive auto-analysis into an unbounded loop\. Retry with run_auto_analysis=false \(open without analysis and decompile on demand\), or raise IDA_MCP_OPEN_TIMEOUT\.$/u;
+
+/** A known supervisor open deadline, or undefined when the reply is not that sentence. */
+export const supervisorOpenDeadline = (
+  value: unknown,
+): { readonly seconds: number; readonly reason: string } | undefined => {
+  const rejected = rejectedOpenDatabaseSchema.safeParse(value);
+  if (!rejected.success) return undefined;
+  const seconds = Number(
+    SUPERVISOR_OPEN_DEADLINE.exec(rejected.data.error)?.[1],
+  );
+  const timeoutMs = seconds * 1000;
+  if (
+    !Number.isSafeInteger(seconds) ||
+    seconds < 1 ||
+    !Number.isSafeInteger(timeoutMs)
+  )
+    return undefined;
+  return { seconds, reason: rejected.data.error };
+};
+
 export const databaseListSchema = z
   .object({
     sessions: z.array(

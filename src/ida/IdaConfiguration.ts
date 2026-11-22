@@ -355,6 +355,36 @@ export const idaRegistrationTimeoutGuidance = (
   remediationAction: `Set timeoutMs in the JSON file named by REA_IDA_MCP_CONFIG to an integer from 1 to ${String(MAX_NODE_TIMER_DELAY_MS)} (omitted means ${String(DEFAULT_IDA_REQUEST_TIMEOUT_MS)}). REA applies the edited file on the next IDA connection after it re-reads the registration; an already open session keeps the timeout it connected with. Allow execution, cleanup and delivery headroom in the outer MCP client deadline. Confirm outstanding work and cleanup before retrying.`,
 });
 
+/**
+ * Recovery for a headless worker the ida-pro-mcp supervisor reaped at
+ * `IDA_MCP_OPEN_TIMEOUT`. `seconds` is that supervisor deadline.
+ */
+export const idaSupervisorOpenTimeoutGuidance = (
+  seconds: number,
+): {
+  readonly timeoutMs: number;
+  readonly userMessage: string;
+  readonly remediationAction: string;
+  readonly diagnostics: {
+    readonly deadline_source: "IDA_MCP_OPEN_TIMEOUT";
+    readonly deadline_owner: "ida-pro-mcp";
+    readonly deadline_seconds: number;
+  };
+} => {
+  const timeoutMs = seconds * 1000;
+  return {
+    timeoutMs,
+    userMessage: `The ida-pro-mcp supervisor reaped the headless worker at its IDA_MCP_OPEN_TIMEOUT deadline of ${String(seconds)} s (${String(timeoutMs)} ms) during idb_open (deadlineExpired).`,
+    remediationAction:
+      "Raise IDA_MCP_OPEN_TIMEOUT in the ida-pro-mcp supervisor environment above the expected open and auto-analysis time, then start that supervisor again and retry. The registration timeoutMs deadline is a separate per-request limit.",
+    diagnostics: {
+      deadline_source: "IDA_MCP_OPEN_TIMEOUT",
+      deadline_owner: "ida-pro-mcp",
+      deadline_seconds: seconds,
+    },
+  };
+};
+
 /** A REA_IDA_MCP_CONFIG rejection that names the setting it concerns. */
 export const idaConfigurationError = (
   constraint: string,
